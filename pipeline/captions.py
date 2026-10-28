@@ -88,7 +88,7 @@ def _gemini(prompt: str, model: str, key: str) -> dict:
     }
     r = requests.post(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        params={"key": key},
+        headers={"x-goog-api-key": key},
         json={"contents": [{"parts": [{"text": prompt}]}],
               "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema,
                                    "temperature": 0.8}},
