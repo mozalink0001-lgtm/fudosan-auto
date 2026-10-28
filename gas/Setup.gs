@@ -129,13 +129,19 @@ function selfCheck() {
   ok('シート', !!book_().getSheetByName(CONFIG.SHEETS.VIDEOS), 'メニュー①を実行');
   ok('ドライブのフォルダ', !!prop_('FOLDER_INBOX'), 'メニュー①を実行');
   ok('ウェブアプリURL', !!webAppUrl_(), 'デプロイ → ウェブアプリ を実行し、URLを設定画面に貼る');
-  var gh = false;
+  // 公開リポジトリは誰でも読めるので、実際に依頼（何も起動しない ping）を送れるかで確かめる
+  var gh = false, ghHint = 'リポジトリ名（ユーザー名/リポジトリ名）とトークンを確認';
   if (prop_('GH_REPO') && prop_('GH_TOKEN')) {
-    var res = UrlFetchApp.fetch('https://api.github.com/repos/' + prop_('GH_REPO'), {
-      headers: { Authorization: 'Bearer ' + prop_('GH_TOKEN') }, muteHttpExceptions: true });
-    gh = res.getResponseCode() === 200;
+    var res = UrlFetchApp.fetch('https://api.github.com/repos/' + prop_('GH_REPO') + '/dispatches', {
+      method: 'post', contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + prop_('GH_TOKEN'), Accept: 'application/vnd.github+json' },
+      payload: JSON.stringify({ event_type: 'ping' }), muteHttpExceptions: true });
+    gh = res.getResponseCode() === 204;
+    if (res.getResponseCode() === 403) ghHint = 'トークンの権限が足りません（Contents を Read and write に）';
+    if (res.getResponseCode() === 404) ghHint = 'リポジトリ名が違うか、トークンでこのリポジトリが選ばれていません';
+    if (res.getResponseCode() === 401) ghHint = 'トークンが無効です（期限切れ・貼り間違い）';
   }
-  ok('GitHub', gh, 'リポジトリ名（ユーザー名/リポジトリ名）とトークンを確認');
+  ok('GitHub', gh, ghHint);
   var line = false;
   if (prop_('LINE_TOKEN')) {
     var lr = UrlFetchApp.fetch('https://api.line.me/v2/bot/info', {
