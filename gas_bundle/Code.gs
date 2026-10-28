@@ -712,7 +712,15 @@ function startVideo_(g) {
     '素材名': g.files.map(function (f) { return f.getName(); }).join('、'),
     '作成日時': now_(), '更新日時': now_()
   });
-  dispatch_('render', no);
+  try {
+    dispatch_('render', no);
+  } catch (e) {
+    var row = findRow_(CONFIG.SHEETS.VIDEOS, '動画No', no);
+    update_(CONFIG.SHEETS.VIDEOS, row._row, { '状態': '失敗', '注意': String(e).slice(0, 300), '更新日時': now_() });
+    notifyOwner_('⚠ ' + no + ' の編集をGitHubに依頼できませんでした。\n' + e +
+      '\n設定画面のGitHubのトークンを確認してから「修正 ' + parseInt(no.replace(/\D/g, ''), 10) + '」でやり直せます。');
+    return;
+  }
   log_(no + ' の編集を開始（' + g.id + '・' + g.files.length + '本）');
 }
 
@@ -807,8 +815,12 @@ function reviseVideo_(n, memo) {
   var v = videoByNumber_(n);
   if (!v) return '動画No.' + n + ' が見つかりません';
   if (['承認待ち', '失敗', '差し戻し'].indexOf(v['状態']) < 0) return v['動画No'] + ' は「' + v['状態'] + '」なので作り直せません';
+  try {
+    dispatch_('render', v['動画No']);
+  } catch (e) {
+    return '⚠ GitHubに依頼できませんでした：' + e;
+  }
   update_(CONFIG.SHEETS.VIDEOS, v._row, { '状態': '編集中', '修正メモ': memo, '更新日時': now_() });
-  dispatch_('render', v['動画No']);
   return '🔁 ' + v['動画No'] + ' を作り直します。できたらまたお知らせします。' + (memo ? '\n指示: ' + memo : '');
 }
 
@@ -875,7 +887,18 @@ function publishDue() {
   viaGithub.forEach(function (r) {
     update_(CONFIG.SHEETS.POSTS, r._row, { '状態': '投稿中', 'ジョブ': job, '更新日時': now_() });
   });
-  dispatch_('publish', job);
+  try {
+    dispatch_('publish', job);
+  } catch (e) {
+    viaGithub.forEach(function (r) {
+      update_(CONFIG.SHEETS.POSTS, r._row, { '状態': '予約済み', 'ジョブ': '', '更新日時': now_() });
+    });
+    // 10分ごとに再試行するので、通知は1時間に1回まで（LINEの通数を使いすぎないため）
+    if (now_().getTime() - Number(prop_('PUB_FAIL_NOTIFIED') || 0) > 3600000) {
+      setProp_('PUB_FAIL_NOTIFIED', now_().getTime());
+      notifyOwner_('⚠ 投稿をGitHubに依頼できませんでした。10分ごとに再試行します。\n' + e);
+    }
+  }
 }
 
 // ---------------- 3. 成約 ----------------
