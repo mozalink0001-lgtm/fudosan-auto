@@ -66,6 +66,8 @@ def _prompt(prop, brand, transcript, memo, feedback):
         f"LINEへの誘導は「{brand['cta_title']}{brand['cta_body']}」の趣旨で",
         "絵文字は控えめ（1投稿に3個まで）",
     ]
+    if brand.get("area_note"):
+        rules.append(f"対象エリアは{brand['area_note']}。ハッシュタグには物件の区名・駅名を入れる（例: #北区賃貸 #梅田 ）")
     p = ("あなたは不動産会社のSNS担当です。次の物件のSNS投稿文を作ってください。\n\n"
          f"## 物件情報\n{json.dumps(facts(prop), ensure_ascii=False, indent=1)}\n\n")
     if transcript:
