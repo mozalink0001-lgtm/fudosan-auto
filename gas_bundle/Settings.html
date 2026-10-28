@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_blank">
+<style>
+  body { font-family: "Hiragino Sans", "Noto Sans JP", sans-serif; font-size: 13px; color: #1d2421; margin: 0; padding: 4px 8px 24px; }
+  h3 { font-size: 14px; margin: 20px 0 6px; padding-top: 12px; border-top: 1px solid #d9dfdb; }
+  h3:first-child { border-top: 0; margin-top: 4px; }
+  label { display: block; margin: 8px 0 2px; color: #5d6862; }
+  input[type=text], input[type=password], textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #c9d1cd; border-radius: 4px; font-size: 13px; }
+  textarea { height: 60px; }
+  .copy { display: flex; gap: 6px; }
+  .copy input { background: #f3f5f4; }
+  button { padding: 7px 14px; border: 1px solid #2c6e5a; background: #fff; color: #2c6e5a; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  button.primary { background: #2c6e5a; color: #fff; }
+  a.btn { display: inline-block; margin-top: 8px; padding: 7px 14px; background: #2c6e5a; color: #fff; border-radius: 4px; text-decoration: none; }
+  .note { color: #5d6862; font-size: 12px; margin-top: 4px; }
+  .ok { color: #2c6e5a; font-weight: bold; }
+  .bar { position: sticky; bottom: 0; background: #fff; padding: 10px 0; display: flex; gap: 8px; border-top: 1px solid #d9dfdb; margin-top: 20px; }
+  pre { white-space: pre-wrap; background: #f3f5f4; padding: 8px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div id="app">読み込み中…</div>
+<script>
+function esc(s) { return String(s || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+function copyBox(id, value) {
+  return '<div class="copy"><input type="text" id="' + id + '" readonly value="' + esc(value) + '">' +
+    '<button type="button" onclick="var e=document.getElementById(\'' + id + '\');e.select();document.execCommand(\'copy\')">コピー</button></div>';
+}
+function field(id, label, value, opts) {
+  opts = opts || {};
+  var type = opts.secret ? 'password' : 'text';
+  var ph = value === '保存済み' ? '保存済み（変更するときだけ入力）' : (opts.ph || '');
+  var v = value === '保存済み' ? '' : value;
+  return '<label for="' + id + '">' + label + '</label><input type="' + type + '" id="' + id + '" value="' + esc(v) + '" placeholder="' + esc(ph) + '">' +
+    (opts.note ? '<div class="note">' + opts.note + '</div>' : '');
+}
+function render(s) {
+  var h = '';
+  h += '<h3>1. ウェブアプリ</h3>';
+  h += field('WEBAPP_URL', 'ウェブアプリのURL（デプロイ時に表示される …/exec）', s.webapp_url_saved || s.webapp_url);
+  h += '<h3>2. GitHub（動画編集と投稿の実行場所）</h3>';
+  h += field('GH_REPO', 'リポジトリ名', s.GH_REPO, { ph: 'ユーザー名/fudosan-auto' });
+  h += field('GH_TOKEN', 'GitHub のトークン（Fine-grained, Contents: Read and write）', s.GH_TOKEN, { secret: true });
+  h += '<label>GitHub の Secrets に登録する値</label>';
+  h += '<div class="note">GAS_URL</div>' + copyBox('c1', s.webapp_url_saved || s.webapp_url);
+  h += '<div class="note">GAS_SECRET</div>' + copyBox('c2', s.gas_secret);
+  h += '<h3>3. 公式LINE</h3>';
+  h += field('LINE_TOKEN', 'チャネルアクセストークン（長期）', s.LINE_TOKEN, { secret: true });
+  h += '<label>LINE Developers の Webhook URL に貼る値</label>' + copyBox('c3', s.line_webhook);
+  h += '<label>オーナー登録（あなたのLINEから公式LINEに、次の文をそのまま送る）</label>' + copyBox('c4', s.owner_code);
+  h += '<div class="note">' + (s.owner_set ? '<span class="ok">登録済み</span>' : 'まだ登録されていません') + '</div>';
+  h += '<label for="LINE_GREETING">友だち追加のあいさつ（空欄なら標準の文）</label><textarea id="LINE_GREETING">' + esc(s.LINE_GREETING) + '</textarea>';
+  h += '<h3>4. Instagram</h3>';
+  h += field('IG_APP_ID', 'Instagram アプリID（Metaアプリの「Instagram」設定内）', s.IG_APP_ID);
+  h += field('IG_APP_SECRET', 'Instagram アプリシークレット', s.IG_APP_SECRET, { secret: true });
+  h += '<label>リダイレクトURI（Meta の設定に貼る値）</label>' + copyBox('c5', s.webapp_url_saved || s.webapp_url);
+  h += s.ig_auth ? '<a class="btn" href="' + esc(s.ig_auth) + '">Instagram と連携する</a>' : '<div class="note">アプリIDを保存すると連携ボタンが出ます</div>';
+  h += '<div class="note">' + (s.IG_USERNAME ? '<span class="ok">連携済み：@' + esc(s.IG_USERNAME) + '</span>' : '未連携') + '</div>';
+  h += field('IG_TOKEN_MANUAL', '（代わりに）Metaの画面で発行したトークンを貼る', '', { secret: true });
+  h += '<h3>5. Threads</h3>';
+  h += '<label><input type="checkbox" id="THREADS_AUTOPOST"' + (s.THREADS_AUTOPOST ? ' checked' : '') + '> Threads にも自動投稿する（ならし運用が終わってからオン）</label>';
+  h += '<label><input type="checkbox" id="THREADS_DELETE"' + (s.THREADS_DELETE ? ' checked' : '') + '> 成約時に Threads の投稿を自動で削除する（変更したら連携し直す）</label>';
+  h += field('THREADS_APP_ID', 'Threads アプリID', s.THREADS_APP_ID);
+  h += field('THREADS_APP_SECRET', 'Threads アプリシークレット', s.THREADS_APP_SECRET, { secret: true });
+  h += s.threads_auth ? '<a class="btn" href="' + esc(s.threads_auth) + '">Threads と連携する</a>' : '<div class="note">アプリIDを保存すると連携ボタンが出ます</div>';
+  h += '<div class="note">' + (s.THREADS_USERNAME ? '<span class="ok">連携済み：@' + esc(s.THREADS_USERNAME) + '</span>' : '未連携') + '</div>';
+  h += field('THREADS_TOKEN_MANUAL', '（代わりに）発行済みのトークンを貼る', '', { secret: true });
+  h += field('THREADS_TOPIC', 'Threads のトピック', s.THREADS_TOPIC);
+  h += '<div class="bar"><button class="primary" onclick="save()">保存</button><button onclick="check()">状態チェック</button><span id="msg"></span></div>';
+  h += '<pre id="out" style="display:none"></pre>';
+  document.getElementById('app').innerHTML = h;
+}
+function val(id) { var e = document.getElementById(id); return e ? (e.type === 'checkbox' ? e.checked : e.value) : undefined; }
+function save() {
+  var ids = ['WEBAPP_URL', 'GH_REPO', 'GH_TOKEN', 'LINE_TOKEN', 'LINE_GREETING', 'IG_APP_ID', 'IG_APP_SECRET', 'IG_TOKEN_MANUAL',
+    'THREADS_APP_ID', 'THREADS_APP_SECRET', 'THREADS_TOKEN_MANUAL', 'THREADS_TOPIC', 'THREADS_AUTOPOST', 'THREADS_DELETE'];
+  var form = {};
+  ids.forEach(function (k) { form[k] = val(k); });
+  document.getElementById('msg').textContent = '保存中…';
+  google.script.run.withSuccessHandler(function (m) {
+    document.getElementById('msg').textContent = m;
+    google.script.run.withSuccessHandler(render).getSettings();
+  }).withFailureHandler(function (e) { document.getElementById('msg').textContent = 'エラー: ' + e.message; }).saveSettings(form);
+}
+function check() {
+  var o = document.getElementById('out');
+  o.style.display = 'block';
+  o.textContent = '確認中…';
+  google.script.run.withSuccessHandler(function (t) { o.textContent = t; }).withFailureHandler(function (e) { o.textContent = e.message; }).selfCheck();
+}
+google.script.run.withSuccessHandler(render).withFailureHandler(function (e) {
+  document.getElementById('app').textContent = 'エラー: ' + e.message + '（先にメニュー①の初期設定を実行してください）';
+}).getSettings();
+</script>
+</body>
+</html>

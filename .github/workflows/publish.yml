@@ -1,0 +1,83 @@
+name: SNSに投稿
+
+# Instagram と Threads は「公開URLにある画像・動画」を取りに来る仕組みなので、
+# 投稿の間だけ GitHub Pages に素材を置き、終わったら空のページで上書きして公開を止める。
+
+on:
+  repository_dispatch:
+    types: [publish]
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 投稿ジョブID（例 J261028190600）
+        required: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -q requests pillow
+
+      - name: 投稿する素材を用意
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+          GAS_SECRET: ${{ secrets.GAS_SECRET }}
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+        run: python -m pipeline.publish prepare --job-id "$JOB_ID" --site _site --state "$RUNNER_TEMP/job.json"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+          retention-days: 1
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 投稿
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+          GAS_SECRET: ${{ secrets.GAS_SECRET }}
+        run: python -m pipeline.publish run --state "$RUNNER_TEMP/job.json" --base-url "${{ steps.deployment.outputs.page_url }}"
+
+  cleanup:
+    needs: publish
+    if: always()
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+    steps:
+      - name: 空のページを用意
+        run: |
+          mkdir _empty
+          echo '<!doctype html><title>media</title>' > _empty/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          name: github-pages-empty
+          path: _empty
+          retention-days: 1
+
+      - uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-empty

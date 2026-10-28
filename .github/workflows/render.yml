@@ -1,0 +1,53 @@
+name: 動画を編集
+
+on:
+  repository_dispatch:
+    types: [render]
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 動画No（例 V0001）
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-${{ github.event.client_payload.job_id || inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ffmpeg と日本語フォントを入れる
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-noto-cjk > /dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Python のライブラリを入れる
+        run: pip install -q -r requirements.txt
+
+      - name: 文字起こしモデルのキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ vars.WHISPER_MODEL || 'small' }}
+
+      - name: 編集する
+        env:
+          GAS_URL: ${{ secrets.GAS_URL }}
+          GAS_SECRET: ${{ secrets.GAS_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'small' }}
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+        run: python -m pipeline.render --job-id "$JOB_ID"
