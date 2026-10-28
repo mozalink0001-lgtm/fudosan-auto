@@ -14,7 +14,9 @@ from .graphics import headline
 from .util import log, walk_minutes, yen_short
 
 FIELDS = {
-    "hook": "動画冒頭に大きく出す一言。16文字以内。家賃や一番の魅力など結論から",
+    "hook": ("動画冒頭に大きく出す一言（表紙にもなる）。14文字以内。結論から言い切る。"
+             "型の例：「家賃7.8万でこの広さ」「北浜駅8分の南向き1LDK」「独立洗面台つきで7万台」。"
+             "前置き（紹介します・今回は）は書かない"),
     "cover_title": "カルーセル1枚目のタイトル。20文字以内",
     "reel_caption": "Instagramリールの本文。冒頭1行で要点、箇条書き3〜5点、最後にLINEへの誘導",
     "carousel_caption": "Instagramカルーセルの本文。保存したくなる要点整理、最後にLINEへの誘導",
