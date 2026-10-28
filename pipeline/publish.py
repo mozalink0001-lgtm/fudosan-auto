@@ -89,8 +89,9 @@ class IG:
         return {"media_id": mid, "permalink": link}
 
     def reel(self, url, caption):
+        # 表紙は冒頭の大見出しのコマ（1秒目）にする
         cid = self._post(f"{self.uid}/media", media_type="REELS", video_url=url, caption=caption,
-                         share_to_feed="true")["id"]
+                         share_to_feed="true", thumb_offset="1000")["id"]
         return self.publish(cid)
 
     def carousel(self, urls, caption):

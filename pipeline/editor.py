@@ -1,9 +1,12 @@
-"""撮影素材からリール動画とカルーセル用の写真を作る。
+"""撮影素材からリール動画とカルーセル用の写真を作る（v2）。
 
 2つの編集モードがある。
-- ツアー: 話していないルームツアー。撮影時に1秒止まった箇所（freeze）を部屋の区切りとみなし、
-  各部屋の中盤を少し速めて約30秒にまとめ、BGMを主役にする。
+- ツアー: 話していないルームツアー。撮影時に止まった箇所（freeze）を部屋の区切りとみなし、
+  AI が各場面の部屋名・見どころ・写りを判定する。一番見栄えのする場面を冒頭に置き、
+  残りを撮影順に 2〜3 秒ずつ、等倍速・スワイプの切り替えでつなぐ。音は BGM。
 - トーク: 話しながらの紹介。無音部分だけを詰め、文字起こしから字幕を焼き込む。
+
+どちらも、手ぶれ補正・明るさと色の補正・ゆっくり寄るズームをかける。
 """
 from __future__ import annotations
 
@@ -15,14 +18,20 @@ from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageStat
 
-from . import graphics
+from . import graphics, vision
 from .util import ROOT, ffprobe, find_font, log, run
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".3gp", ".webm"}
 AUDIO_EXT = {".mp3", ".m4a", ".wav", ".aac", ".ogg"}
 
-ENC_FAST = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+ENC_FAST = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+ENC_V = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-pix_fmt", "yuv420p", "-an"]
+
+# 室内は暗く色が浅くなりがちなので、少し明るく・鮮やかに・くっきりさせる
+GRADE = "eq=contrast=1.06:brightness=0.03:saturation=1.2:gamma=1.05,unsharp=5:5:0.45:5:5:0"
+XF = 0.3            # 場面の切り替え（スワイプ）の秒数
+ZOOM_PER_FRAME = 0.0007   # ゆっくり寄るズーム（3秒で約6%）
 
 
 @dataclass
@@ -33,20 +42,32 @@ class Clip:
     duration: float
 
 
-# ---------------- 正規化と結合 ----------------
+# ---------------- 正規化（縦型化・手ぶれ補正・色補正） ----------------
 
-def normalize(src: Path, dst: Path) -> float:
-    info = ffprobe(src)
-    w, h = info["width"], info["height"]
+def _frame_chain(w: int, h: int) -> tuple[str, bool]:
+    """縦 1080x1920 にする filter。横長はぼかし背景の上に置く（filter_complex が必要）。"""
     if w / h > 0.75:
-        # 横長・正方形はぼかし背景の上に配置
-        fc = ("[0:v]split[a][b];"
-              "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-              "boxblur=40:6,eq=brightness=-0.08[bg];"
-              "[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,setsar=1,format=yuv420p[v]")
-    else:
-        fc = ("[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-              "fps=30,setsar=1,format=yuv420p[v]")
+        return ("[0:v]split[a][b];"
+                "[a]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+                "boxblur=40:6,eq=brightness=-0.08[bg];"
+                "[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,setsar=1"), True
+    return "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1", True
+
+
+def normalize(src: Path, dst: Path, stabilize: bool = True) -> float:
+    info = ffprobe(src)
+    base, _ = _frame_chain(info["width"], info["height"])
+    trf = dst.with_suffix(".trf")
+    stab = ""
+    if stabilize:
+        try:
+            run(["ffmpeg", "-y", "-i", str(src), "-filter_complex",
+                 base + f",vidstabdetect=shakiness=6:accuracy=12:result={trf.name}[v]",
+                 "-map", "[v]", "-f", "null", "-"], cwd=dst.parent)
+            stab = f",vidstabtransform=input={trf.name}:smoothing=20:optzoom=1:interpol=bicubic"
+        except RuntimeError:
+            log("手ぶれ補正をスキップ:", src.name)
+    fc = base + stab + "," + GRADE + ",format=yuv420p[v]"
     cmd = ["ffmpeg", "-y", "-i", str(src)]
     if info["has_audio"]:
         cmd += ["-filter_complex", fc + ";[0:a:0]aresample=48000,aformat=channel_layouts=stereo[a]",
@@ -54,7 +75,7 @@ def normalize(src: Path, dst: Path) -> float:
     else:
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
                 "-filter_complex", fc, "-map", "[v]", "-map", "1:a", "-shortest"]
-    run(cmd + ENC_FAST + [str(dst)])
+    run(cmd + ENC_FAST + [dst.name], cwd=dst.parent)
     return ffprobe(dst)["duration"]
 
 
@@ -96,8 +117,6 @@ def speech_ratio(silences, total) -> float:
     return max(0.0, 1 - silent / total) if total else 0.0
 
 
-# ---------------- 区間の選び方 ----------------
-
 def room_segments(total: float, clips: list[Clip], freezes) -> list[tuple[float, float]]:
     """クリップの境目と静止区間で区切った「部屋ごとの区間」を返す。"""
     cuts = {0.0, total}
@@ -112,13 +131,12 @@ def room_segments(total: float, clips: list[Clip], freezes) -> list[tuple[float,
     pts = sorted(cuts)
     segs = []
     for a, b in zip(pts, pts[1:]):
-        # 静止区間そのものは動画には使わない（写真用に回す）
-        if any(s - 0.05 <= a and b <= e + 0.05 for s, e in freezes):
-            continue
+        if any(s - 0.05 <= a and b <= e + 0.05 for s, e in freezes if e > s):
+            continue  # 静止区間そのものは動画に使わない（写真に回す）
         if b - a >= 1.2:
             segs.append((a, b))
     if len(segs) <= 1 and total > 12:
-        step = 5.0
+        step = 4.0
         segs = [(t, min(total, t + step)) for t in frange(0, total, step) if min(total, t + step) - t >= 1.2]
     return segs
 
@@ -130,36 +148,58 @@ def frange(a, b, step):
         t += step
 
 
-def pick_tour(segs, cfg) -> list[tuple[float, float, float]]:
-    speed = float(cfg["tour_speed"])
-    budget = (cfg["tour_target_seconds"] - cfg["endcard_seconds"]) * speed  # 素材上の秒数
+# ---------------- 場面の選び方 ----------------
+
+@dataclass
+class Part:
+    start: float
+    end: float
+    room: str = ""
+    caption: str = ""
+
+    @property
+    def dur(self):
+        return self.end - self.start
+
+
+def plan_tour(segs, labels, cfg) -> list[Part]:
+    """冒頭＝一番見栄えのする場面、その後は撮影順。各場面 2〜3 秒。"""
+    idx = list(range(len(segs)))
+    if labels:
+        good = [i for i in idx if labels[i]["quality"] >= 2] or idx
+    else:
+        good = idx
     maxn = int(cfg["max_segments"])
-    if len(segs) > maxn:
-        idx = sorted({round(i * (len(segs) - 1) / (maxn - 1)) for i in range(maxn)})
-        segs = [segs[i] for i in idx]
-    usable = [(a + 0.25, b - 0.25) for a, b in segs if b - a > 0.8]
-    if not usable:
-        return []
-    per = budget / len(usable)
-    take = [min(b - a, per) for a, b in usable]
-    left = budget - sum(take)
-    if left > 0.5:
-        room = [(b - a) - t for (a, b), t in zip(usable, take)]
-        tot = sum(room)
-        if tot > 0:
-            take = [t + left * r / tot for t, r in zip(take, room)]
-    out = []
-    for i, ((a, b), t) in enumerate(zip(usable, take)):
-        t = min(t, b - a)
-        # 1本目（外観）は頭から、他は区間の中央を使う
-        start = a if i == 0 else a + (b - a - t) / 2
-        out.append((start, start + t, speed))
-    return out
+    if len(good) > maxn:  # 多すぎるときは写りの良い順に残す（並びは撮影順のまま）
+        rank = sorted(good, key=lambda i: -(labels[i]["quality"] if labels else 0))[:maxn]
+        good = sorted(rank)
+    hero = None
+    if labels:
+        heroes = [i for i in good if labels[i]["hero"]]
+        hero = heroes[0] if heroes else max(good, key=lambda i: labels[i]["quality"])
+    if hero is None:
+        hero = max(good, key=lambda i: segs[i][1] - segs[i][0])   # 一番長く映した場面
+    order = [hero] + [i for i in good if i != hero]
+    hook_len = float(cfg.get("hook_seconds", 2.6)) + XF
+    body = float(cfg["tour_target_seconds"]) - float(cfg["endcard_seconds"])
+    rest = max(1, len(order) - 1)
+    per = min(3.6, max(1.8, (body - hook_len) / rest + XF))
+    parts = []
+    for n, i in enumerate(order):
+        a, b = segs[i][0] + 0.2, segs[i][1] - 0.2
+        want = hook_len if n == 0 else per
+        t = min(want, b - a)
+        if t < 1.0:
+            continue
+        mid = (a + b) / 2
+        s = max(a, min(mid - t / 2, b - t))
+        lab = labels[i] if labels else {}
+        parts.append(Part(s, s + t, lab.get("room", ""), lab.get("caption", "")))
+    return parts
 
 
-def pick_talk(total, silences, cfg) -> list[tuple[float, float, float]]:
-    keep = []
-    cur = 0.0
+def plan_talk(total, silences, cfg) -> list[Part]:
+    keep, cur = [], 0.0
     for s, e in silences:
         if s - cur > 0.15:
             keep.append((max(0.0, cur - 0.15), min(total, s + 0.2)))
@@ -178,26 +218,42 @@ def pick_talk(total, silences, cfg) -> list[tuple[float, float, float]]:
         if used >= limit:
             break
         b = min(b, a + (limit - used))
-        out.append((a, b, 1.0))
+        out.append(Part(a, b))
         used += b - a
     return out
 
 
-def cut(src: Path, parts, dst: Path):
-    fc, labels = [], []
-    for i, (s, e, sp) in enumerate(parts):
-        fc.append(f"[0:v]trim=start={s:.3f}:end={e:.3f},setpts=(PTS-STARTPTS)/{sp}[v{i}]")
-        at = f",atempo={sp}" if abs(sp - 1) > 1e-3 else ""
-        fc.append(f"[0:a]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS{at}[a{i}]")
-        labels.append(f"[v{i}][a{i}]")
-    fc.append(f"{''.join(labels)}concat=n={len(parts)}:v=1:a=1[v][a]")
-    script = dst.with_suffix(".filter")
-    script.write_text(";\n".join(fc), encoding="utf-8")
-    run(["ffmpeg", "-y", "-i", str(src), "-filter_complex_script", str(script),
-         "-map", "[v]", "-map", "[a]"] + ENC_FAST + [str(dst)])
+# ---------------- 切り出しとつなぎ ----------------
+
+def render_part(src: Path, p: Part, dst: Path, zoom: bool = True):
+    vf = f"trim=start={p.start:.3f}:end={p.end:.3f},setpts=PTS-STARTPTS"
+    if zoom:
+        vf += (f",zoompan=z='min(pzoom+{ZOOM_PER_FRAME},1.08)':d=1:s=1080x1920:fps=30"
+               ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'")
+    run(["ffmpeg", "-y", "-i", str(src), "-vf", vf + ",format=yuv420p"] + ENC_V + [str(dst)])
 
 
-# ---------------- 字幕 ----------------
+def join_swipe(parts: list[Path], durs: list[float], dst: Path) -> list[float]:
+    """スワイプでつなぎ、各場面が完成動画の何秒から始まるかを返す。"""
+    if len(parts) == 1:
+        parts[0].replace(dst)
+        return [0.0]
+    cmd = ["ffmpeg", "-y"]
+    for p in parts:
+        cmd += ["-i", str(p)]
+    fc, starts, acc, prev = [], [0.0], 0.0, "[0:v]"
+    for k in range(1, len(parts)):
+        acc += durs[k - 1] - XF
+        starts.append(acc)
+        trans = "smoothleft"
+        out = f"[x{k}]"
+        fc.append(f"{prev}[{k}:v]xfade=transition={trans}:duration={XF}:offset={acc:.3f}{out}")
+        prev = out
+    run(cmd + ["-filter_complex", ";".join(fc), "-map", prev] + ENC_V + [str(dst)])
+    return starts
+
+
+# ---------------- 字幕（トーク） ----------------
 
 def ass_time(t: float) -> str:
     h = int(t // 3600)
@@ -208,10 +264,9 @@ def ass_time(t: float) -> str:
 
 def write_ass(subs: list[dict], dst: Path, brand: dict) -> Path:
     from PIL import ImageFont
-    family = ImageFont.truetype(find_font(), 10).getname()[0]
+    family = ImageFont.truetype(find_font(True), 10).getname()[0]
     accent = brand["colors"]["accent"].lstrip("#")
-    # ASS の色は &HAABBGGRR
-    acc = f"&H00{accent[4:6]}{accent[2:4]}{accent[0:2]}"
+    acc = f"&H00{accent[4:6]}{accent[2:4]}{accent[0:2]}"   # ASS の色は &HAABBGGRR
     head = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -220,21 +275,21 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{family},66,&H00FFFFFF,{acc},&H00141414,&H64000000,-1,0,0,0,100,100,0,0,1,6,0,2,60,60,720,1
+Style: Main,{family},72,&H00FFFFFF,{acc},&H00000000,&H78000000,-1,0,0,0,100,100,0,0,1,7,2,2,70,70,700,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = []
     for sub in subs:
-        text = sub["text"].strip()
+        text = re.sub(r"[。、]$", "", sub["text"].strip())
         if not text:
             continue
-        chunks = [text[i:i + 30] for i in range(0, len(text), 30)]
+        chunks = [text[i:i + 26] for i in range(0, len(text), 26)]
         dur = (sub["end"] - sub["start"]) / len(chunks)
         for k, ch in enumerate(chunks):
             st = sub["start"] + k * dur
-            body = ch if len(ch) <= 15 else ch[:15] + "\\N" + ch[15:]
+            body = ch if len(ch) <= 13 else ch[:13] + "\\N" + ch[13:]
             lines.append(f"Dialogue: 0,{ass_time(st)},{ass_time(st + dur)},Main,,0,0,0,,{body}")
     dst.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
     return dst
@@ -305,16 +360,22 @@ def pick_bgm(brand: dict, key: str) -> Path | None:
     return files[h % len(files)]
 
 
+def slide_in(start: float, x_end: int = 60, dur: float = 0.3) -> str:
+    """左から滑り込む x 座標の式。"""
+    return f"'if(lt(t-{start:.3f},{dur}),-w+(t-{start:.3f})/{dur}*(w+{x_end}),{x_end})'"
+
+
 def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
                text_fn, transcriber=None) -> dict:
     """素材 → reel.mp4 と写真候補。
 
     text_fn(transcript) は投稿文の dict（hook を含む）を返す関数。字幕の文字起こしが
     終わってから呼ぶので、話した内容を投稿文に反映できる。
-    transcriber(path)->[{start,end,text}] は任意（トークモードのときだけ使う）。
+    transcriber は引数なしで呼ぶと文字起こし関数を返すもの（トークのときだけ読み込む）。
     """
     cfg = brand["reel"]
     work.mkdir(parents=True, exist_ok=True)
+    warnings: list[str] = []
 
     clips: list[Clip] = []
     offset = 0.0
@@ -339,83 +400,151 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
     else:
         mode = "talk" if ratio > 0.45 and total > 8 else "tour"
     log(f"静止区間 {len(freezes)} / 発話率 {ratio:.0%} → {mode}")
-
     segs = room_segments(total, clips, freezes)
-    parts = pick_talk(total, silences, cfg) if mode == "talk" else pick_tour(segs, cfg)
+
+    labels = None
+    if mode == "tour":
+        frames = []
+        for i, (a, b) in enumerate(segs):
+            f = work / f"seg_{i:02d}.jpg"
+            if grab_frame(full, (a + b) / 2, f):
+                frames.append(f)
+        if len(frames) == len(segs):
+            labels = vision.label_scenes(frames, prop, brand.get("gemini_model", "gemini-2.5-flash"))
+        if labels is None:
+            warnings.append("場面の自動判定ができなかったため、部屋名のテロップなしで作りました")
+        parts = plan_tour(segs, labels, cfg)
+    else:
+        parts = plan_talk(total, silences, cfg)
     if not parts:
-        parts = [(0.0, min(total, cfg["tour_target_seconds"]), 1.0)]
-    body = work / "body.mp4"
-    cut(full, parts, body)
+        parts = [Part(0.0, min(total, cfg["tour_target_seconds"]))]
+
+    # 場面ごとに切り出し → つなぐ
+    subs, transcript = [], ""
+    if mode == "tour":
+        files = []
+        for k, p in enumerate(parts):
+            f = work / f"part_{k:02d}.mp4"
+            render_part(full, p, f)
+            files.append(f)
+        body = work / "body.mp4"
+        starts = join_swipe(files, [p.dur for p in parts], body)
+    else:
+        body = work / "body.mp4"
+        fc = []
+        for k, p in enumerate(parts):
+            fc.append(f"[0:v]trim=start={p.start:.3f}:end={p.end:.3f},setpts=PTS-STARTPTS[v{k}]")
+            fc.append(f"[0:a]atrim=start={p.start:.3f}:end={p.end:.3f},asetpts=PTS-STARTPTS[a{k}]")
+        fc.append("".join(f"[v{k}][a{k}]" for k in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=1[v][a]")
+        script = work / "talk.filter"
+        script.write_text(";\n".join(fc), encoding="utf-8")
+        run(["ffmpeg", "-y", "-i", str(full), "-filter_complex_script", str(script),
+             "-map", "[v]", "-map", "[a]"] + ENC_FAST + [str(body)])
+        starts = []
+        if transcriber is not None:
+            try:
+                fn = transcriber()
+                if fn:
+                    subs = fn(body)
+                    transcript = "".join(s["text"] for s in subs)
+            except Exception as e:  # 字幕が作れなくても動画は作る
+                log("文字起こしをスキップ:", e)
     body_dur = ffprobe(body)["duration"]
 
-    subs, transcript = [], ""
-    if transcriber is not None and mode == "talk":
-        try:
-            subs = transcriber(body)
-            transcript = "".join(s["text"] for s in subs)
-        except Exception as e:  # 字幕が作れなくても動画は作る
-            log("文字起こしをスキップ:", e)
-    use_subs = mode == "talk" and subs
     texts = text_fn(transcript)
     hook = texts.get("hook") or graphics.headline(prop)
 
-    hook_png, info_png = work / "hook.png", work / "info.png"
-    graphics.hook_overlay(prop, hook, brand, hook_png)
-    graphics.info_overlay(prop, brand, info_png)
-    hs = cfg["hook_seconds"]
-    fc = (f"[0:v][1:v]overlay=0:0:enable='between(t,0,{hs})'[v1];"
-          f"[v1][2:v]overlay=0:0:enable='gte(t,{hs})'[v2]")
-    if use_subs:
+    # テロップを重ねる
+    hs = parts[0].dur - XF if mode == "tour" else float(cfg["hook_seconds"])
+    ov = [("hook.png", f"between(t,0,{hs:.2f})", "0", "0")]
+    graphics.hook_overlay_v2(prop, hook, brand, work / "hook.png")
+    graphics.brand_mark(brand, work / "brand.png")
+    ov.append(("brand.png", f"gte(t,{hs:.2f})", "0", "0"))
+    graphics.info_card(prop, brand, work / "info.png")
+    last_start = starts[-1] if starts else max(hs, body_dur - 4)
+    # 物件情報の札は最後の場面だけ（冒頭の大見出しにも家賃と間取りは出ている）
+    end_t = body_dur - XF
+    ov.append(("info.png", f"between(t,{last_start + XF:.2f},{end_t:.2f})", "0", "0"))
+    if mode == "tour" and labels:
+        for k, p in enumerate(parts[1:], start=1):
+            if not (p.room or p.caption):
+                continue
+            name = f"label_{k:02d}.png"
+            graphics.room_label(p.room, p.caption, brand, work / name)
+            st = starts[k] + XF
+            en = starts[k] + p.dur - XF
+            ov.append((name, f"between(t,{st:.2f},{en:.2f})", slide_in(st), "1120"))
+    cmd = ["ffmpeg", "-y", "-i", str(body)]
+    for name, *_ in ov:
+        cmd += ["-i", str(work / name)]
+    fc, prev = [], "[0:v]"
+    for k, (name, enable, x, y) in enumerate(ov, start=1):
+        out = f"[o{k}]"
+        fc.append(f"{prev}[{k}:v]overlay=x={x}:y={y}:enable='{enable}':eval=frame{out}")
+        prev = out
+    if mode == "talk" and subs:
         ass = write_ass(subs, work / "subs.ass", brand)
-        fontsdir = str(Path(find_font()).parent)
-        fc += f";[v2]subtitles=filename='{ass}':fontsdir='{fontsdir}'[v]"
-    else:
-        fc += ";[v2]null[v]"
+        fontsdir = str(Path(find_font(True)).parent)
+        fc.append(f"{prev}subtitles=filename='{ass}':fontsdir='{fontsdir}'[vout]")
+        prev = "[vout]"
+    script = work / "overlay.filter"
+    script.write_text(";\n".join(fc), encoding="utf-8")
     body_ov = work / "body_ov.mp4"
-    run(["ffmpeg", "-y", "-i", str(body), "-i", str(hook_png), "-i", str(info_png),
-         "-filter_complex", fc, "-map", "[v]", "-map", "0:a"] + ENC_FAST + [str(body_ov)])
+    maps = ["-map", prev] + (["-map", "0:a"] if mode == "talk" else [])
+    run(cmd + ["-filter_complex_script", str(script)] + maps +
+        (ENC_FAST if mode == "talk" else ENC_V) + [str(body_ov)])
 
-    last = work / "last.jpg"
-    grab_frame(body, max(0.0, body_dur - 0.2), last)
+    # 最後の画面
+    hero_photo = work / "hero.jpg"
+    grab_frame(full, (parts[0].start + parts[0].end) / 2, hero_photo)
     end_jpg = work / "endcard.jpg"
-    graphics.endcard(prop, brand, last, end_jpg)
-    ec = cfg["endcard_seconds"]
+    graphics.endcard_v2(prop, brand, hero_photo, end_jpg)
+    ec = float(cfg["endcard_seconds"])
     end_mp4 = work / "endcard.mp4"
     run(["ffmpeg", "-y", "-loop", "1", "-t", str(ec), "-i", str(end_jpg),
-         "-f", "lavfi", "-t", str(ec), "-i", "anullsrc=r=48000:cl=stereo",
-         "-vf", "scale=1080:1920,fps=30,format=yuv420p,fade=t=in:st=0:d=0.3",
-         "-map", "0:v", "-map", "1:a"] + ENC_FAST + [str(end_mp4)])
+         "-vf", "scale=1080:1920,fps=30,format=yuv420p"] + ENC_V + [str(end_mp4)])
 
+    # つないで音を付ける
+    total_out = body_dur + ec - XF
     reel = work / "reel.mp4"
-    total_out = body_dur + ec
-    voice = 1.0 if mode == "talk" else float(brand.get("voice_volume_tour", 0.25))
     bgm = pick_bgm(brand, str(prop.get("id", "")))
     cmd = ["ffmpeg", "-y", "-i", str(body_ov), "-i", str(end_mp4)]
-    fc = f"[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a0];[a0]volume={voice}[vo]"
-    if bgm:
-        bvol = float(brand.get("bgm_volume", 0.18)) * (0.45 if mode == "talk" else 1.0)
+    fc = f"[0:v][1:v]xfade=transition=fade:duration={XF}:offset={body_dur - XF:.3f},format=yuv420p[v]"
+    if mode == "talk":
+        if bgm:
+            cmd += ["-stream_loop", "-1", "-i", str(bgm)]
+            fc += (f";[0:a]apad[vo];[2:a]atrim=0:{total_out:.2f},asetpts=PTS-STARTPTS,"
+                   f"volume={float(brand.get('bgm_volume', 0.18)) * 0.45}[bg];"
+                   f"[vo][bg]amix=inputs=2:duration=longest:normalize=0,atrim=0:{total_out:.2f}[mx];"
+                   "[mx]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
+        else:
+            fc += f";[0:a]apad,atrim=0:{total_out:.2f},loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
+    elif bgm:
         cmd += ["-stream_loop", "-1", "-i", str(bgm)]
-        fc += (f";[2:a]atrim=0:{total_out:.2f},asetpts=PTS-STARTPTS,volume={bvol},"
-               f"afade=t=in:st=0:d=0.8,afade=t=out:st={max(0, total_out - 1.5):.2f}:d=1.5[bg];"
-               f"[vo][bg]amix=inputs=2:duration=first:normalize=0[mx];"
-               f"[mx]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
+        fc += (f";[2:a]atrim=0:{total_out:.2f},asetpts=PTS-STARTPTS,"
+               f"afade=t=in:st=0:d=0.5,afade=t=out:st={max(0, total_out - 1.2):.2f}:d=1.2,"
+               "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
     else:
-        fc += ";[vo]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
+        warnings.append("BGMが入っていません（assets/bgm に曲を入れると自動で付きます）")
+        cmd += ["-f", "lavfi", "-t", f"{total_out:.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        fc += ";[2:a]anull[a]"
     cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "high",
-            "-maxrate", "10M", "-bufsize", "20M", "-pix_fmt", "yuv420p", "-r", "30",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-profile:v", "high",
+            "-maxrate", "12M", "-bufsize", "24M", "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
             "-movflags", "+faststart", "-t", f"{total_out:.2f}", str(reel)]
     run(cmd)
 
     photos = pick_photos(clips, freezes, segs, work)
     meta = {"mode": mode, "speech_ratio": round(ratio, 3), "source_seconds": round(total, 1),
             "reel_seconds": round(ffprobe(reel)["duration"], 1), "segments": len(parts),
-            "photos": len(photos), "bgm": bgm.name if bgm else None, "subtitles": bool(use_subs)}
+            "rooms": [p.room for p in parts], "photos": len(photos),
+            "bgm": bgm.name if bgm else None, "subtitles": bool(subs),
+            "cover_ms": int(min(1.2, hs * 0.6) * 1000)}
     (work / "edit.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     log("編集結果", meta)
     return {"reel": reel, "photos": photos, "transcript": transcript, "meta": meta,
-            "endcard": end_jpg, "texts": texts}
+            "endcard": end_jpg, "texts": texts, "warnings": warnings}
 
 
 def build_images(photos: list[Path], prop: dict, cover_title: str, brand: dict, out: Path) -> dict:

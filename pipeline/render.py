@@ -29,14 +29,15 @@ def produce(clips: list[Path], prop: dict, memo: str, out: Path) -> dict:
         state["warnings"] = warnings
         return texts
 
-    res = editor.build_reel(clips, prop, brand, work, text_fn, transcriber=get_transcriber())
+    res = editor.build_reel(clips, prop, brand, work, text_fn, transcriber=get_transcriber)
     texts = res["texts"]
     imgs = editor.build_images(res["photos"], prop, texts.get("cover_title") or "", brand, out)
     reel = out / "reel.mp4"
     shutil.move(str(res["reel"]), reel)
     files = {"reel": reel, "carousel": imgs["carousel"], "story": imgs["story"]}
     (out / "captions.json").write_text(json.dumps(texts, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"files": files, "texts": texts, "warnings": state.get("warnings", []), "meta": res["meta"]}
+    warnings = state.get("warnings", []) + res.get("warnings", [])
+    return {"files": files, "texts": texts, "warnings": warnings, "meta": res["meta"]}
 
 
 def remote(job_id: str):

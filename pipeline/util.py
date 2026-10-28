@@ -35,10 +35,10 @@ def mask(value: str | None):
         print(f"::add-mask::{value}", flush=True)
 
 
-def run(cmd: list[str], quiet: bool = True) -> subprocess.CompletedProcess:
+def run(cmd: list[str], quiet: bool = True, cwd=None) -> subprocess.CompletedProcess:
     if not quiet:
         log(" ".join(cmd))
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    p = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     if p.returncode != 0:
         log("command failed:", " ".join(cmd[:6]), "...")
         log(p.stderr[-3000:])
@@ -69,7 +69,17 @@ def ffprobe(path: Path) -> dict:
     return {"width": w, "height": h, "duration": dur, "has_audio": a is not None}
 
 
-def find_font() -> str:
+HEAVY_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",   # fonts-noto-cjk-extra
+    "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc",
+]
+
+
+def find_font(heavy: bool = False) -> str:
+    if heavy:
+        for c in HEAVY_CANDIDATES:
+            if Path(c).exists():
+                return c
     env = os.environ.get("FONT_PATH")
     if env and Path(env).exists():
         return env
