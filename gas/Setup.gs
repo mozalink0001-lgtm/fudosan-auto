@@ -8,6 +8,7 @@ function onOpen() {
     .addSeparator()
     .addItem('今すぐ新着動画を確認', 'tick')
     .addItem('状態チェック', 'showCheck')
+    .addItem('最新版に更新（GitHubから）', 'updateFromGitHubMenu')
     .addItem('自動実行をオフにする', 'removeTriggers')
     .addToUi();
 }
@@ -158,4 +159,57 @@ function selfCheck() {
 
 function showCheck() {
   SpreadsheetApp.getUi().alert(selfCheck());
+}
+
+// ---------------- GitHub の最新版に自分で入れ替える ----------------
+// 必要なもの（最初の1回だけ）:
+//   1. https://script.google.com/home/usersettings で「Google Apps Script API」をオン
+//   2. appsscript.json（マニフェスト）に script.projects と script.deployments の権限がある
+
+function updateFromGitHubMenu() {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    ui.alert(updateFromGitHub());
+  } catch (e) {
+    ui.alert('更新できませんでした。\n\n' + e + '\n\n「Google Apps Script API」がオンになっているか確認してください：\nhttps://script.google.com/home/usersettings');
+  }
+}
+
+function updateFromGitHub() {
+  var repo = prop_('GH_REPO');
+  if (!repo) throw new Error('設定画面で GitHub のリポジトリ名を保存してください');
+  var raw = 'https://raw.githubusercontent.com/' + repo + '/main/gas_bundle/';
+  var code = UrlFetchApp.fetch(raw + 'Code.gs').getContentText();
+  var html = UrlFetchApp.fetch(raw + 'Settings.html').getContentText();
+  if (code.indexOf('function tick()') < 0) throw new Error('GitHub から正しいコードを取得できませんでした');
+
+  var api = 'https://script.googleapis.com/v1/projects/' + ScriptApp.getScriptId();
+  var headers = { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() };
+  var current = fetchJson_(api + '/content', { headers: headers });
+  // マニフェスト（JSON）は今のものを残し、コードと画面のファイルを入れ替える
+  var files = (current.files || []).filter(function (f) { return f.type === 'JSON'; });
+  files.push({ name: 'コード', type: 'SERVER_JS', source: code });
+  files.push({ name: 'Settings', type: 'HTML', source: html });
+  fetchJson_(api + '/content', {
+    method: 'put', contentType: 'application/json', headers: headers,
+    payload: JSON.stringify({ files: files })
+  });
+
+  // ウェブアプリ（LINE・GitHub の受け口）は版を固定して公開されているので、新しい版に切り替える
+  var ver = fetchJson_(api + '/versions', {
+    method: 'post', contentType: 'application/json', headers: headers,
+    payload: JSON.stringify({ description: 'GitHubから更新 ' + fmt_(now_()) })
+  });
+  var m = webAppUrl_().match(/\/s\/([^\/]+)\/exec/);
+  if (m) {
+    fetchJson_(api + '/deployments/' + m[1], {
+      method: 'put', contentType: 'application/json', headers: headers,
+      payload: JSON.stringify({ deploymentConfig: {
+        scriptId: ScriptApp.getScriptId(), versionNumber: ver.versionNumber,
+        manifestFileName: 'appsscript', description: 'GitHubから更新 ' + fmt_(now_())
+      } })
+    });
+  }
+  log_('GitHub の最新版に更新しました（版 ' + ver.versionNumber + '）');
+  return '最新版に更新しました（版 ' + ver.versionNumber + '）。' + (m ? '' : '\nウェブアプリのURLが未設定のため、受け口の切り替えはしていません。');
 }

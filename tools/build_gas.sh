@@ -14,4 +14,5 @@ out=gas_bundle/Code.gs
   done
 } > "$out"
 cp gas/Settings.html gas_bundle/Settings.html
+cp gas/appsscript.json gas_bundle/appsscript.json
 echo "wrote $out ($(wc -l < "$out") lines)"
