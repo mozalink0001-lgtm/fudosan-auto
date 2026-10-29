@@ -69,6 +69,11 @@ def ffprobe(path: Path) -> dict:
     return {"width": w, "height": h, "duration": dur, "has_audio": a is not None}
 
 
+def audio_duration(path: Path) -> float:
+    p = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)])
+    return float(p.stdout.strip() or 0)
+
+
 HEAVY_CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Black.ttc",   # fonts-noto-cjk-extra
     "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc",

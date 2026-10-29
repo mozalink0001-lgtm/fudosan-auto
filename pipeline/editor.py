@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageStat
 
-from . import graphics, vision
+from . import graphics, narration, vision
 from .util import ROOT, ffprobe, find_font, log, run
 
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".3gp", ".webm"}
@@ -262,7 +262,7 @@ def ass_time(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def write_ass(subs: list[dict], dst: Path, brand: dict) -> Path:
+def write_ass(subs: list[dict], dst: Path, brand: dict, margin_v: int = 700) -> Path:
     from PIL import ImageFont
     family = ImageFont.truetype(find_font(True), 10).getname()[0]
     accent = brand["colors"]["accent"].lstrip("#")
@@ -275,21 +275,26 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{family},72,&H00FFFFFF,{acc},&H00000000,&H78000000,-1,0,0,0,100,100,0,0,1,7,2,2,70,70,700,1
+Style: Main,{family},66,&H00FFFFFF,{acc},&H00000000,&H78000000,-1,0,0,0,100,100,0,0,1,7,2,2,70,70,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    from PIL import ImageDraw
+    measure = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    f = graphics.font(66, True)
     lines = []
     for sub in subs:
         text = re.sub(r"[。、]$", "", sub["text"].strip())
         if not text:
             continue
-        chunks = [text[i:i + 26] for i in range(0, len(text), 26)]
-        dur = (sub["end"] - sub["start"]) / len(chunks)
-        for k, ch in enumerate(chunks):
+        # テロップと同じく、単語の途中で切らない改行。2行ずつ画面に出す
+        rows = graphics.wrap(measure, text, f, 900)
+        pages = [rows[i:i + 2] for i in range(0, len(rows), 2)]
+        dur = (sub["end"] - sub["start"]) / len(pages)
+        for k, page in enumerate(pages):
             st = sub["start"] + k * dur
-            body = ch if len(ch) <= 13 else ch[:13] + "\\N" + ch[13:]
+            body = "\\N".join(page)   # ASS の改行記号
             lines.append(f"Dialogue: 0,{ass_time(st)},{ass_time(st + dur)},Main,,0,0,0,,{body}")
     dst.write_text(head + "\n".join(lines) + "\n", encoding="utf-8")
     return dst
@@ -458,6 +463,26 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
     texts = text_fn(transcript)
     hook = texts.get("hook") or graphics.headline(prop)
 
+    # AI ナレーション（ツアーのみ）。音声が作れなければ字幕だけ出す
+    narr_lines, narr_plan, narr_model = [], [], ""
+    ec = float(cfg["endcard_seconds"])
+    if mode == "tour" and brand.get("narration", True):
+        scenes = [{"room": p.room, "caption": p.caption, "dur": p.dur} for p in parts]
+        script = narration.write_script(scenes, prop, brand, hook)
+        if script:
+            try:
+                narr_lines, narr_model = narration.synth(script, brand.get("tts_voice", "Kore"), work)
+            except Exception as e:
+                log("ナレーション音声をスキップ:", str(e)[:200])
+                warnings.append(f"ナレーション音声を作れなかったため、字幕だけ出しました（{str(e)[:120]}）")
+                narr_lines = [narration.Line(t) for t in script]
+            narr_plan = narration.schedule(narr_lines, starts, [p.dur for p in parts], XF, ec - XF)
+        else:
+            warnings.append("ナレーション原稿を作れなかったため、ナレーションなしで作りました")
+        if narr_lines:
+            subs = [{"start": st, "end": st + dur, "text": ln.text}
+                    for ln, (st, dur, _) in zip(narr_lines, narr_plan) if ln.text]
+
     # テロップを重ねる
     hs = parts[0].dur - XF if mode == "tour" else float(cfg["hook_seconds"])
     ov = [("hook.png", f"between(t,0,{hs:.2f})", "0", "0")]
@@ -475,9 +500,11 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
                 continue
             name = f"label_{k:02d}.png"
             graphics.room_label(p.room, p.caption, brand, work / name)
+            if k == len(parts) - 1:
+                continue  # 最後の場面は物件情報の札を同じ位置に出す
             st = starts[k] + XF
             en = starts[k] + p.dur - XF
-            ov.append((name, f"between(t,{st:.2f},{en:.2f})", slide_in(st), "1120"))
+            ov.append((name, f"between(t,{st:.2f},{en:.2f})", slide_in(st), "230"))
     cmd = ["ffmpeg", "-y", "-i", str(body)]
     for name, *_ in ov:
         cmd += ["-i", str(work / name)]
@@ -486,8 +513,8 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
         out = f"[o{k}]"
         fc.append(f"{prev}[{k}:v]overlay=x={x}:y={y}:enable='{enable}':eval=frame{out}")
         prev = out
-    if mode == "talk" and subs:
-        ass = write_ass(subs, work / "subs.ass", brand)
+    if subs:
+        ass = write_ass(subs, work / "subs.ass", brand, margin_v=470 if mode == "tour" else 700)
         fontsdir = str(Path(find_font(True)).parent)
         fc.append(f"{prev}subtitles=filename='{ass}':fontsdir='{fontsdir}'[vout]")
         prev = "[vout]"
@@ -503,7 +530,6 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
     grab_frame(full, (parts[0].start + parts[0].end) / 2, hero_photo)
     end_jpg = work / "endcard.jpg"
     graphics.endcard_v2(prop, brand, hero_photo, end_jpg)
-    ec = float(cfg["endcard_seconds"])
     end_mp4 = work / "endcard.mp4"
     run(["ffmpeg", "-y", "-loop", "1", "-t", str(ec), "-i", str(end_jpg),
          "-vf", "scale=1080:1920,fps=30,format=yuv420p"] + ENC_V + [str(end_mp4)])
@@ -523,6 +549,28 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
                    "[mx]loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
         else:
             fc += f";[0:a]apad,atrim=0:{total_out:.2f},loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
+    elif any(ln.wav for ln in narr_lines):
+        # ナレーションを各場面の頭に置き、BGM は声の後ろで小さく流す
+        if bgm:
+            cmd += ["-stream_loop", "-1", "-i", str(bgm)]
+        else:
+            cmd += ["-f", "lavfi", "-t", f"{total_out:.2f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        idx, voices = 3, []
+        for ln, (st, _, tempo) in zip(narr_lines, narr_plan):
+            if not ln.wav:
+                continue
+            cmd += ["-i", str(ln.wav)]
+            ms = int(st * 1000)
+            fc += (f";[{idx}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                   f"atempo={tempo:.3f},adelay={ms}|{ms}[n{idx}]")
+            voices.append(f"[n{idx}]")
+            idx += 1
+        fc += (f";{''.join(voices)}amix=inputs={len(voices)}:normalize=0,apad,atrim=0:{total_out:.2f},"
+               "volume=1.6[voice]"
+               f";[2:a]atrim=0:{total_out:.2f},asetpts=PTS-STARTPTS,volume=0.32,"
+               f"afade=t=in:st=0:d=0.5,afade=t=out:st={max(0, total_out - 1.2):.2f}:d=1.2[bg]"
+               ";[voice][bg]amix=inputs=2:duration=first:normalize=0,"
+               "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
     elif bgm:
         cmd += ["-stream_loop", "-1", "-i", str(bgm)]
         fc += (f";[2:a]atrim=0:{total_out:.2f},asetpts=PTS-STARTPTS,"
@@ -544,6 +592,7 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
             "reel_seconds": round(ffprobe(reel)["duration"], 1), "segments": len(parts),
             "rooms": [p.room for p in parts], "photos": len(photos),
             "bgm": bgm.name if bgm else None, "subtitles": bool(subs),
+            "narration": narr_model or ("字幕のみ" if narr_lines else None),
             "cover_ms": int(min(1.2, hs * 0.6) * 1000)}
     (work / "edit.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     log("編集結果", meta)

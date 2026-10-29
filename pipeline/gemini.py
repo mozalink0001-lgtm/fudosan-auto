@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -25,11 +26,14 @@ def _version(name: str) -> tuple:
     return (float(m.group(1)) if m else 0.0,)
 
 
-def available_flash_models(key: str) -> list[str]:
-    """このキーで今使える Flash 系モデルを新しい順に返す（モデルの提供終了に自動で追従するため）。"""
-    global _available
-    if _available is not None:
-        return _available
+_listing: list[str] | None = None
+
+
+def _list_models(key: str) -> list[str]:
+    """このキーで generateContent が使えるモデル名の一覧（1回だけ問い合わせる）。"""
+    global _listing
+    if _listing is not None:
+        return _listing
     names: list[str] = []
     try:
         page = ""
@@ -39,20 +43,70 @@ def available_flash_models(key: str) -> list[str]:
             if not r.ok:
                 break
             j = r.json()
-            for m in j.get("models", []):
-                n = m.get("name", "").removeprefix("models/")
-                if ("generateContent" in m.get("supportedGenerationMethods", []) and "flash" in n
-                        and not re.search(r"lite|image|tts|live|audio|thinking|exp", n)):
-                    names.append(n)
+            names += [m.get("name", "").removeprefix("models/") for m in j.get("models", [])
+                      if "generateContent" in m.get("supportedGenerationMethods", [])]
             page = j.get("nextPageToken", "")
             if not page:
                 break
     except requests.RequestException:
         pass
+    _listing = names
+    return names
+
+
+def _newest(names: list[str]) -> list[str]:
     stable = [n for n in names if "preview" not in n]
-    _available = sorted(stable, key=_version, reverse=True) + sorted(
+    return sorted(stable, key=_version, reverse=True) + sorted(
         [n for n in names if "preview" in n], key=_version, reverse=True)
+
+
+def available_flash_models(key: str) -> list[str]:
+    """このキーで今使える Flash 系モデルを新しい順に返す（モデルの提供終了に自動で追従するため）。"""
+    global _available
+    if _available is None:
+        _available = _newest([n for n in _list_models(key) if "flash" in n
+                              and not re.search(r"lite|image|tts|live|audio|thinking|exp", n)])
     return _available
+
+
+def tts_models(key: str) -> list[str]:
+    names = [n for n in _list_models(key) if "tts" in n]
+    return _newest([n for n in names if "flash" in n]) + _newest([n for n in names if "flash" not in n])
+
+
+def tts(text: str, voice: str = "Kore", timeout: int = 180) -> tuple[bytes, int, str]:
+    """読み上げ音声を作る。(16bit モノラル PCM, サンプリング周波数, 使ったモデル名) を返す。"""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise GeminiError("GEMINI_API_KEY が未設定です")
+    models = tts_models(key)[:4]
+    if not models:
+        raise GeminiError("読み上げ用のモデルが見つかりません")
+    last = ""
+    for m in models:
+        r = requests.post(
+            f"{API}/models/{m}:generateContent", headers={"x-goog-api-key": key},
+            json={"contents": [{"parts": [{"text": text}]}],
+                  "generationConfig": {"responseModalities": ["AUDIO"],
+                                       "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}},
+            timeout=timeout)
+        if r.ok:
+            for part in r.json().get("candidates", [{}])[0].get("content", {}).get("parts", []):
+                data = part.get("inlineData") or part.get("inline_data")
+                if data and data.get("data"):
+                    mime = data.get("mimeType") or data.get("mime_type") or ""
+                    rate = int((re.search(r"rate=(\d+)", mime) or [None, 24000])[1])
+                    return base64.b64decode(data["data"]), rate, m
+            last = f"{m}: 音声が返ってきませんでした"
+            continue
+        try:
+            msg = r.json().get("error", {}).get("message", "")
+        except ValueError:
+            msg = r.text[:200]
+        last = f"{m}: HTTP {r.status_code} {msg[:160]}"
+        if r.status_code not in (404, 400, 429, 500, 503):
+            break
+    raise GeminiError(last.replace(key, "***"))
 
 
 def generate_json(parts: list[dict], schema: dict, model: str, temperature: float = 0.7, timeout: int = 120):

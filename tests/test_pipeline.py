@@ -120,6 +120,8 @@ if __name__ == "__main__":
 class GeminiFallbackTest(unittest.TestCase):
     def test_falls_back_on_missing_model_and_reports_key_errors(self):
         from pipeline import gemini
+        gemini._available = None
+        gemini._listing = []
         calls = []
 
         def fake_post(url, **kw):
@@ -142,6 +144,7 @@ class GeminiModelDiscoveryTest(unittest.TestCase):
     def test_retired_model_switches_to_listed_model(self):
         from pipeline import gemini
         gemini._available = None
+        gemini._listing = None
         posted = []
 
         def fake_get(url, **kw):
@@ -166,3 +169,4 @@ class GeminiModelDiscoveryTest(unittest.TestCase):
         self.assertEqual(posted[-1], "gemini-3.8-flash")
         self.assertNotIn("gemini-3.8-flash-lite", posted)
         gemini._available = None
+        gemini._listing = None

@@ -392,12 +392,13 @@ def room_label(room: str, caption: str, brand: dict, out: Path) -> tuple[int, in
     return img.size
 
 
-def info_card(prop: dict, brand: dict, out: Path):
-    """家賃・間取り・駅の札。冒頭の後と最後の場面でだけ出す。"""
+def info_card(prop: dict, brand: dict, out: Path, y0: int = 230):
+    """家賃・間取り・駅の札。最後の場面でだけ、画面の上側に出す（下側はナレーション字幕）。"""
     c = brand["colors"]
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    x0, y0, x1, y1 = 60, 1230, 940, 1480
+    x0, x1 = 60, 940
+    y1 = y0 + 250
     d.rounded_rectangle((x0 + 8, y0 + 10, x1 + 8, y1 + 10), radius=28, fill=(0, 0, 0, 80))
     d.rounded_rectangle((x0, y0, x1, y1), radius=28, fill=(255, 255, 255, 245))
     d.rounded_rectangle((x0, y0, x1, y0 + 64), radius=28, fill=hex_rgba(c["primary"]))
