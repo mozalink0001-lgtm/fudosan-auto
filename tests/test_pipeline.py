@@ -136,3 +136,33 @@ class GeminiFallbackTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)            # キーの誤りでは何度もやり直さない
         self.assertIn("API key not valid", str(cm.exception))
         self.assertNotIn("SECRETKEY", str(cm.exception))
+
+
+class GeminiModelDiscoveryTest(unittest.TestCase):
+    def test_retired_model_switches_to_listed_model(self):
+        from pipeline import gemini
+        gemini._available = None
+        posted = []
+
+        def fake_get(url, **kw):
+            return FakeResp({"models": [
+                {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.8-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.1-flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/text-embedding-9", "supportedGenerationMethods": ["embedContent"]}]})
+
+        def fake_post(url, **kw):
+            m = url.split("/models/")[1].split(":")[0]
+            posted.append(m)
+            if m == "gemini-3.8-flash":
+                return FakeResp({"candidates": [{"content": {"parts": [{"text": "{\"ok\": true}"}]}}]})
+            return FakeResp({"error": {"message": f"This model models/{m} is no longer available."}}, 404)
+
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "K", "GEMINI_MODEL": ""}), \
+                mock.patch.object(gemini.requests, "post", fake_post), \
+                mock.patch.object(gemini.requests, "get", fake_get):
+            out = gemini.generate_json([{"text": "hi"}], {}, "gemini-2.5-flash")
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(posted[-1], "gemini-3.8-flash")
+        self.assertNotIn("gemini-3.8-flash-lite", posted)
+        gemini._available = None

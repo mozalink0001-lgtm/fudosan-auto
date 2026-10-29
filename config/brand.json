@@ -29,7 +29,7 @@
     "#お部屋探し"
   ],
   "threads_topic": "部屋探し",
-  "gemini_model": "gemini-2.5-flash",
+  "gemini_model": "gemini-flash-latest",
   "ng_words": [
     "完全",
     "完ぺき",
