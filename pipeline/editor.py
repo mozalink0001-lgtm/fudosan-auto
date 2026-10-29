@@ -411,9 +411,13 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
                 frames.append(f)
         if len(frames) == len(segs):
             labels = vision.label_scenes(frames, prop, brand.get("gemini_model", "gemini-2.5-flash"))
-        if labels is None:
-            warnings.append("場面の自動判定ができなかったため、部屋名のテロップなしで作りました")
         parts = plan_tour(segs, labels, cfg)
+        if labels is None:
+            # AI が使えないときは、物件台帳の「おすすめポイント」を場面ごとに順番に出す
+            points = [x.strip() for x in re.split(r"[、,\n／/・]", str(prop.get("points", ""))) if x.strip()]
+            for p, pt in zip(parts[1:], points):
+                p.caption = pt[:14]
+            warnings.append("場面の自動判定ができなかったため、テロップは物件台帳のおすすめポイントを順に使いました")
     else:
         parts = plan_talk(total, silences, cfg)
     if not parts:
@@ -465,7 +469,7 @@ def build_reel(clip_paths: list[Path], prop: dict, brand: dict, work: Path,
     # 物件情報の札は最後の場面だけ（冒頭の大見出しにも家賃と間取りは出ている）
     end_t = body_dur - XF
     ov.append(("info.png", f"between(t,{last_start + XF:.2f},{end_t:.2f})", "0", "0"))
-    if mode == "tour" and labels:
+    if mode == "tour":
         for k, p in enumerate(parts[1:], start=1):
             if not (p.room or p.caption):
                 continue
