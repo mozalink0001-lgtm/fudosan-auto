@@ -8,8 +8,8 @@ import json
 import os
 import re
 
-import requests
 
+from . import gemini
 from .graphics import headline
 from .util import log, walk_minutes, yen_short
 
@@ -83,24 +83,14 @@ def _prompt(prop, brand, transcript, memo, feedback):
     return p
 
 
-def _gemini(prompt: str, model: str, key: str) -> dict:
+def _gemini(prompt: str, model: str, key: str = "") -> dict:
     schema = {
         "type": "OBJECT",
         "properties": {k: ({"type": "ARRAY", "items": {"type": "STRING"}} if k == "hashtags" else {"type": "STRING"})
                        for k in FIELDS},
         "required": list(FIELDS),
     }
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": key},
-        json={"contents": [{"parts": [{"text": prompt}]}],
-              "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema,
-                                   "temperature": 0.8}},
-        timeout=90,
-    )
-    r.raise_for_status()
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text)
+    return gemini.generate_json([{"text": prompt}], schema, model, temperature=0.8, timeout=90)
 
 
 def template(prop: dict, brand: dict) -> dict:
@@ -155,8 +145,8 @@ def generate(prop: dict, brand: dict, transcript: str = "", memo: str = "") -> t
             try:
                 cand = _gemini(_prompt(prop, brand, transcript, memo, feedback), model, key)
             except Exception as e:
-                log("Gemini エラー:", type(e).__name__)
-                warnings.append("AI文章の生成に失敗したため、テンプレートの文章を使いました")
+                log("Gemini エラー:", str(e)[:200])
+                warnings.append(f"AI文章の生成に失敗したため、テンプレートの文章を使いました（{str(e)[:180]}）")
                 break
             hits = find_ng(json.dumps(cand, ensure_ascii=False), brand["ng_words"])
             raw = cand

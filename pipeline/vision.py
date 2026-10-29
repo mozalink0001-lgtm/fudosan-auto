@@ -10,9 +10,9 @@ import json
 import os
 from pathlib import Path
 
-import requests
 from PIL import Image
 
+from . import gemini
 from .util import log
 
 ROOMS = ["外観", "エントランス", "玄関", "廊下", "LDK", "リビング", "ダイニング", "キッチン", "洋室", "和室",
@@ -54,18 +54,9 @@ def label_scenes(frames: list[Path], prop: dict, model: str) -> list[dict] | Non
             "required": ["index", "room", "caption", "quality", "hero"]},
     }
     try:
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            headers={"x-goog-api-key": key},
-            json={"contents": [{"parts": parts}],
-                  "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema,
-                                       "temperature": 0.2}},
-            timeout=120,
-        )
-        r.raise_for_status()
-        items = json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+        items = gemini.generate_json(parts, schema, model, temperature=0.2)
     except Exception as e:
-        log("場面の判定をスキップ:", type(e).__name__)
+        log("場面の判定をスキップ:", str(e)[:200])
         return None
     out = [{"room": "", "caption": "", "quality": 3, "hero": False} for _ in frames]
     for it in items:

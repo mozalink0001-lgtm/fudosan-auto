@@ -115,3 +115,24 @@ class PublishTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeminiFallbackTest(unittest.TestCase):
+    def test_falls_back_on_missing_model_and_reports_key_errors(self):
+        from pipeline import gemini
+        calls = []
+
+        def fake_post(url, **kw):
+            calls.append(url.split("/models/")[1].split(":")[0])
+            if len(calls) == 1:
+                return FakeResp({"error": {"message": "models/x is not found for API version v1beta"}}, 404)
+            return FakeResp({"error": {"message": "API key not valid. Please pass a valid API key."}}, 400)
+
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "SECRETKEY", "GEMINI_MODEL": ""}), \
+                mock.patch.object(gemini.requests, "post", fake_post):
+            with self.assertRaises(gemini.GeminiError) as cm:
+                gemini.generate_json([{"text": "hi"}], {}, "old-model")
+        self.assertEqual(calls[0], "old-model")
+        self.assertEqual(len(calls), 2)            # キーの誤りでは何度もやり直さない
+        self.assertIn("API key not valid", str(cm.exception))
+        self.assertNotIn("SECRETKEY", str(cm.exception))
